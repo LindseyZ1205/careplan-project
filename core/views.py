@@ -33,7 +33,11 @@ def _generate_careplan_text(data: CarePlanInput) -> str:
         "Pharmacist Interventions / Plan:\n"
         "- Educate patient on proper medication use and adherence.\n\n"
         "Monitoring Plan & Lab Schedule:\n"
-        "- Monitor relevant labs and clinical markers per standard of care.\n"
+        "- Monitor relevant labs and clinical markers per standard of care.\n\n"
+        "---\nSummary:\n"
+        f"This care plan covers {full_name} for {data.diagnosis} on {data.medication_name}. "
+        "Key next steps: complete DTP assessment, set SMART goals with the patient, "
+        "deliver interventions, and follow the monitoring schedule above.\n"
     )
 
 

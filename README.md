@@ -1,8 +1,8 @@
-## CarePlan MVP (Django + PostgreSQL + Redis + Docker)
+## CarePlan MVP (Django + PostgreSQL + Redis + Celery + Docker)
 
-- **Submit** creates **Patient / Doctor / Order / CarePlan** with `CarePlan.status=pending`, then **`RPUSH`s `careplan_id`** to Redis list `careplan:pending` (after DB commit via `transaction.on_commit`).
-- **HTTP response** returns immediately: `{"message":"已收到","careplan_id":...,"status":"pending"}` (API **202**). No worker in this repo yet — nothing consumes the queue or calls the LLM.
-- **PostgreSQL** + **Redis** via Docker Compose; `migrate` runs before `runserver`.
+- **Submit** creates **Patient / Doctor / Order / CarePlan** with `status=pending`, then **`transaction.on_commit`** schedules **`generate_care_plan_task.delay(careplan_id)`** (Celery broker = Redis).
+- **HTTP** returns **202** + `careplan_id` immediately. **No polling, no SSE, no auto-refresh** — you only see `completed` + `careplan_text` after **you** reload the page or call **GET** `/api/careplan/<id>/` again.
+- **Celery worker** runs **`core.tasks.generate_care_plan_task`**: sets `processing` → calls **LLM** (`core/llm.py`: OpenAI if `OPENAI_API_KEY`, else template text) → `completed`; on failure **retries up to 3 times** with **exponential backoff** (1s, 2s, 4s), then **`failed`**.
 
 ### Run with Docker Compose
 
@@ -11,49 +11,41 @@ docker compose build
 docker compose up
 ```
 
-Open `http://localhost:8000`. Postgres **5432**, Redis **6379** (queue key `careplan:pending` by default).
+Services: **web** (port **8000**), **db** (Postgres **5432**), **redis** (**6379**), **celery** (worker).
 
-### Run locally without Docker
+Open `http://localhost:8000`, submit the form, note `careplan_id`. Watch the **celery** container logs for `Task core.tasks.generate_care_plan_task[...] succeeded`. Then **manually** open `/api/careplan/<id>/` or refresh — until then, the UI still shows only “已收到”.
 
-Without `POSTGRES_HOST`, settings fall back to **SQLite** (`db.sqlite3`) so you can still develop quickly.
+### How to verify Celery is working
 
-To use local Postgres instead, export:
+1. **Logs** — In the terminal where `docker compose up` runs, the **celery** service should print lines like:
+   - `Task core.tasks.generate_care_plan_task[<uuid>] received`
+   - `Task core.tasks.generate_care_plan_task[<uuid>] succeeded`
+2. **Redis** — `docker compose exec redis redis-cli MONITOR` (briefly) or `KEYS *` can show Celery/kombu traffic; easiest is still **worker logs** + **GET** API.
+3. **Database / API** — After a few seconds, **GET** `/api/careplan/<careplan_id>/` should show `"status": "completed"` and a non-empty `careplan_text` (or `"failed"` if LLM kept erroring after retries).
+4. **Optional: OpenAI** — Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`, default `gpt-4o-mini`) on **web** and **celery** services in `docker-compose.yml` to use the real API; without it, the worker uses the **template** generator (still async).
+
+### Local dev without Docker
+
+Set `POSTGRES_*`, `REDIS_HOST=localhost`, install deps, run Postgres + Redis, then:
 
 ```bash
-export POSTGRES_HOST=localhost
-export POSTGRES_DB=careplan
-export POSTGRES_USER=careplan
-export POSTGRES_PASSWORD=careplan
-```
-
-Then:
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
 python manage.py migrate
-python manage.py runserver
+python manage.py runserver   # terminal 1
+celery -A config worker -l info   # terminal 2
 ```
 
-### Models
+For synchronous debugging only:
 
-| Model    | Role |
-|----------|------|
-| Patient  | `first_name`, `last_name`, optional `mrn` |
-| Doctor   | `name`, optional `npi` |
-| Order    | FK → Patient, Doctor; `medication_name`, `diagnosis`, `notes` |
-| CarePlan | OneToOne → Order; `careplan_text`, `status` |
+```bash
+export CELERY_TASK_ALWAYS_EAGER=1
+```
 
-### API
+### LLM env vars
 
-- `GET /api/careplan/` — usage message.
-- `POST /api/careplan/` — enqueue: DB row `pending` + Redis; **202** + `careplan_id`.
-- `GET /api/careplan/<id>/` — fetch CarePlan by id (text empty until a future worker fills it).
-
-### Redis queue
-
-- List key: `CAREPLAN_REDIS_QUEUE_KEY` (default `careplan:pending`). Values: stringified CarePlan primary keys.
-- If `REDIS_HOST` is unset, enqueue is skipped (local SQLite-only dev).
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | If set, calls OpenAI Chat Completions; otherwise template text |
+| `OPENAI_MODEL` | Default `gpt-4o-mini` |
 
 ### Admin
 
@@ -61,4 +53,4 @@ python manage.py runserver
 python manage.py createsuperuser
 ```
 
-Then open `/admin/` to browse tables.
+Then open `/admin/` to inspect **CarePlan** rows and statuses.

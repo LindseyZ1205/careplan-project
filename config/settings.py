@@ -92,4 +92,19 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REDIS_HOST = os.environ.get("REDIS_HOST", "").strip()
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
-CAREPLAN_REDIS_QUEUE_KEY = os.environ.get("CAREPLAN_REDIS_QUEUE_KEY", "careplan:pending")
+
+# Celery (broker = Redis when REDIS_HOST is set)
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "").strip()
+if not CELERY_BROKER_URL and REDIS_HOST:
+    CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "").strip() or CELERY_BROKER_URL
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "300"))
+CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)

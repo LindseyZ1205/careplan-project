@@ -40,7 +40,6 @@ services:
       POSTGRES_PASSWORD: careplan
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      CAREPLAN_REDIS_QUEUE_KEY: careplan:pending
     depends_on:
       db:
         condition: service_healthy
@@ -49,6 +48,28 @@ services:
     command: >
       sh -c "python manage.py migrate --noinput &&
              python manage.py runserver 0.0.0.0:8000"
+
+  celery:
+    build: .
+    volumes:
+      - .:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: careplan
+      POSTGRES_USER: careplan
+      POSTGRES_PASSWORD: careplan
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             celery -A config worker -l info"
 
 volumes:
   postgres_data:

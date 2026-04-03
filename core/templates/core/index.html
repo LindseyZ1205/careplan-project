@@ -102,9 +102,9 @@
     <div class="container">
       <h1>Care Plan Generator</h1>
       <p class="description">
-        提交后写入 PostgreSQL（<code>status=pending</code>），并把
-        <code>careplan_id</code> 推入 Redis 列表 <code>careplan:pending</code>；页面立即显示「已收到」与
-        ID。LLM 生成由后续 worker 处理（当前未实现）。
+        提交后写入 PostgreSQL（<code>pending</code>），并由 <strong>Celery worker</strong> 异步调用
+        LLM 生成正文。本页<strong>不会自动刷新</strong>；要看到 <code>completed</code> 和正文，请你自己刷新页面或请求
+        <code>GET /api/careplan/&lt;id&gt;/</code>。
       </p>
 
       <form method="post">
@@ -153,7 +153,12 @@
         {{ ack.message }} · careplan_id: <strong>{{ ack.careplan_id }}</strong> · status:
         {{ ack.status }}
       </p>
-      <p class="hint">可用 GET /api/careplan/{{ ack.careplan_id }}/ 查看当前状态（生成前正文为空）。</p>
+      <p class="hint">
+        手动刷新或打开
+        <a href="/api/careplan/{{ ack.careplan_id }}/" target="_blank" rel="noreferrer"
+          >/api/careplan/{{ ack.careplan_id }}/</a>
+        查看状态（无 SSE / 轮询）。
+      </p>
       {% endif %}
     </div>
   </body>

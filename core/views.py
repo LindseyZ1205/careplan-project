@@ -1,50 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict
 
+from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import CarePlan, Doctor, Order, Patient
-from .queue import enqueue_careplan_id
-
-
-@dataclass
-class CarePlanInput:
-    patient_first_name: str
-    patient_last_name: str
-    patient_mrn: str
-    doctor_name: str
-    doctor_npi: str
-    diagnosis: str
-    medication_name: str
-    notes: str
-
-
-def _generate_careplan_text(data: CarePlanInput) -> str:
-    """Reserved for a future worker / LLM step (not called on HTTP request path)."""
-    full_name = f"{data.patient_first_name} {data.patient_last_name}".strip()
-    return (
-        f"Care Plan for {full_name}\n"
-        f"Diagnosis: {data.diagnosis}\n"
-        f"Medication: {data.medication_name}\n"
-        f"Referring provider: {data.doctor_name} (NPI: {data.doctor_npi or 'n/a'})\n\n"
-        "Problem List / Drug Therapy Problems (DTPs):\n"
-        "- Pending detailed assessment based on full patient record.\n\n"
-        "Goals (SMART format):\n"
-        "- Improve clinical outcomes related to the primary diagnosis.\n\n"
-        "Pharmacist Interventions / Plan:\n"
-        "- Educate patient on proper medication use and adherence.\n\n"
-        "Monitoring Plan & Lab Schedule:\n"
-        "- Monitor relevant labs and clinical markers per standard of care.\n\n"
-        "---\nSummary:\n"
-        f"This care plan covers {full_name} for {data.diagnosis} on {data.medication_name}. "
-        "Key next steps: complete DTP assessment, set SMART goals with the patient, "
-        "deliver interventions, and follow the monitoring schedule above.\n"
-    )
+from .textgen import CarePlanInput
 
 
 def _care_plan_to_dict(cp: CarePlan) -> Dict[str, Any]:
@@ -93,11 +58,18 @@ def _create_pending_care_plan(data: CarePlanInput) -> CarePlan:
     )
 
 
+def _schedule_celery_task(careplan_id: int) -> None:
+    from .tasks import generate_care_plan_task
+
+    generate_care_plan_task.delay(careplan_id)
+
+
 def _submit_care_plan_request(data: CarePlanInput) -> CarePlan:
     with transaction.atomic():
         care_plan = _create_pending_care_plan(data)
         pk = care_plan.pk
-        transaction.on_commit(lambda: enqueue_careplan_id(pk))
+        if settings.CELERY_BROKER_URL or settings.CELERY_TASK_ALWAYS_EAGER:
+            transaction.on_commit(lambda: _schedule_celery_task(pk))
     return care_plan
 
 
@@ -151,7 +123,8 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
                 "POST to enqueue a care plan: patient_first_name, patient_last_name, "
                 "patient_mrn (optional), doctor_name, doctor_npi (optional), "
                 "diagnosis, medication_name, notes (optional). "
-                "Returns immediately with careplan_id; generation is async (worker not included yet)."
+                "Returns 202 with careplan_id; a Celery worker generates text. "
+                "Refresh GET /api/careplan/<id>/ manually to see completion — no push to browser."
             ),
         })
     if request.method != "POST":

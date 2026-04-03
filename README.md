@@ -1,9 +1,8 @@
-## CarePlan MVP (Django + PostgreSQL + Docker)
+## CarePlan MVP (Django + PostgreSQL + Redis + Docker)
 
-- **HTML form** → synchronous Django view → template “LLM” text (replace later with a real LLM).
-- **PostgreSQL** via Django ORM: **Patient**, **Doctor**, **Order**, **CarePlan** with foreign keys.
-- **CarePlan.status**: `pending` → `processing` → `completed` or `failed`.
-- **Docker Compose** runs **Postgres** and **web**; `migrate` runs before `runserver`.
+- **Submit** creates **Patient / Doctor / Order / CarePlan** with `CarePlan.status=pending`, then **`RPUSH`s `careplan_id`** to Redis list `careplan:pending` (after DB commit via `transaction.on_commit`).
+- **HTTP response** returns immediately: `{"message":"已收到","careplan_id":...,"status":"pending"}` (API **202**). No worker in this repo yet — nothing consumes the queue or calls the LLM.
+- **PostgreSQL** + **Redis** via Docker Compose; `migrate` runs before `runserver`.
 
 ### Run with Docker Compose
 
@@ -12,7 +11,7 @@ docker compose build
 docker compose up
 ```
 
-Open `http://localhost:8000`. Postgres is on host port **5432** (user/db/password: `careplan`).
+Open `http://localhost:8000`. Postgres **5432**, Redis **6379** (queue key `careplan:pending` by default).
 
 ### Run locally without Docker
 
@@ -47,9 +46,14 @@ python manage.py runserver
 
 ### API
 
-- `GET /api/careplan/` — short usage message.
-- `POST /api/careplan/` — create patient/doctor/order/care plan; returns JSON including `id` (CarePlan pk) and `status`.
-- `GET /api/careplan/<id>/` — fetch one care plan by CarePlan id.
+- `GET /api/careplan/` — usage message.
+- `POST /api/careplan/` — enqueue: DB row `pending` + Redis; **202** + `careplan_id`.
+- `GET /api/careplan/<id>/` — fetch CarePlan by id (text empty until a future worker fills it).
+
+### Redis queue
+
+- List key: `CAREPLAN_REDIS_QUEUE_KEY` (default `careplan:pending`). Values: stringified CarePlan primary keys.
+- If `REDIS_HOST` is unset, enqueue is skipped (local SQLite-only dev).
 
 ### Admin
 

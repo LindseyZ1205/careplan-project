@@ -87,3 +87,9 @@ if _static_dir.is_dir():
     STATICFILES_DIRS.append(_static_dir)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Redis queue (optional: leave REDIS_HOST empty to skip enqueue, e.g. local SQLite-only dev)
+REDIS_HOST = os.environ.get("REDIS_HOST", "").strip()
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
+CAREPLAN_REDIS_QUEUE_KEY = os.environ.get("CAREPLAN_REDIS_QUEUE_KEY", "careplan:pending")

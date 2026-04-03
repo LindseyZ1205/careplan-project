@@ -102,8 +102,9 @@
     <div class="container">
       <h1>Care Plan Generator</h1>
       <p class="description">
-        提交后数据写入 PostgreSQL（病人、医生、订单、Care Plan）。Care Plan 状态：
-        pending → processing → completed / failed。
+        提交后写入 PostgreSQL（<code>status=pending</code>），并把
+        <code>careplan_id</code> 推入 Redis 列表 <code>careplan:pending</code>；页面立即显示「已收到」与
+        ID。LLM 生成由后续 worker 处理（当前未实现）。
       </p>
 
       <form method="post">
@@ -142,17 +143,17 @@
         </div>
         <div class="actions">
           <button type="submit">Generate Care Plan</button>
-          <span class="hint">同步生成；完成后状态为 completed。</span>
+          <span class="hint">异步队列：提交后立即返回，不等待生成。</span>
         </div>
       </form>
 
-      {% if careplan %}
-      <h2>Result</h2>
+      {% if ack %}
+      <h2>已收到</h2>
       <p class="meta">
-        Care Plan ID: {{ careplan.id }} · Status: {{ careplan.status }} · Order ID:
-        {{ careplan.order_id }}
+        {{ ack.message }} · careplan_id: <strong>{{ ack.careplan_id }}</strong> · status:
+        {{ ack.status }}
       </p>
-      <pre class="careplan-output">{{ careplan.careplan_text }}</pre>
+      <p class="hint">可用 GET /api/careplan/{{ ack.careplan_id }}/ 查看当前状态（生成前正文为空）。</p>
       {% endif %}
     </div>
   </body>

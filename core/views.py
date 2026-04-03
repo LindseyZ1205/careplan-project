@@ -9,6 +9,7 @@ from django.shortcuts import get_object_or_404, render
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import CarePlan, Doctor, Order, Patient
+from .queue import enqueue_careplan_id
 
 
 @dataclass
@@ -24,6 +25,7 @@ class CarePlanInput:
 
 
 def _generate_careplan_text(data: CarePlanInput) -> str:
+    """Reserved for a future worker / LLM step (not called on HTTP request path)."""
     full_name = f"{data.patient_first_name} {data.patient_last_name}".strip()
     return (
         f"Care Plan for {full_name}\n"
@@ -67,8 +69,7 @@ def _care_plan_to_dict(cp: CarePlan) -> Dict[str, Any]:
     }
 
 
-@transaction.atomic
-def _create_care_plan_from_input(data: CarePlanInput) -> CarePlan:
+def _create_pending_care_plan(data: CarePlanInput) -> CarePlan:
     patient = Patient.objects.create(
         first_name=data.patient_first_name,
         last_name=data.patient_last_name,
@@ -85,20 +86,18 @@ def _create_care_plan_from_input(data: CarePlanInput) -> CarePlan:
         diagnosis=data.diagnosis,
         notes=data.notes,
     )
-    care_plan = CarePlan.objects.create(
+    return CarePlan.objects.create(
         order=order,
         status=CarePlan.Status.PENDING,
+        careplan_text="",
     )
-    care_plan.status = CarePlan.Status.PROCESSING
-    care_plan.save(update_fields=["status", "updated_at"])
-    try:
-        text = _generate_careplan_text(data)
-        care_plan.careplan_text = text
-        care_plan.status = CarePlan.Status.COMPLETED
-    except Exception:
-        care_plan.careplan_text = ""
-        care_plan.status = CarePlan.Status.FAILED
-    care_plan.save(update_fields=["careplan_text", "status", "updated_at"])
+
+
+def _submit_care_plan_request(data: CarePlanInput) -> CarePlan:
+    with transaction.atomic():
+        care_plan = _create_pending_care_plan(data)
+        pk = care_plan.pk
+        transaction.on_commit(lambda: enqueue_careplan_id(pk))
     return care_plan
 
 
@@ -134,8 +133,12 @@ def careplan_form(request: HttpRequest) -> HttpResponse:
 
     if request.method == "POST":
         form_data = _parse_form_input(request)
-        care_plan = _create_care_plan_from_input(form_data)
-        context["careplan"] = _care_plan_to_dict(care_plan)
+        care_plan = _submit_care_plan_request(form_data)
+        context["ack"] = {
+            "message": "已收到",
+            "careplan_id": care_plan.pk,
+            "status": care_plan.status,
+        }
 
     return render(request, "core/index.html", context)
 
@@ -145,17 +148,25 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
     if request.method == "GET":
         return JsonResponse({
             "message": (
-                "Care plan API. POST with: patient_first_name, patient_last_name, "
+                "POST to enqueue a care plan: patient_first_name, patient_last_name, "
                 "patient_mrn (optional), doctor_name, doctor_npi (optional), "
-                "diagnosis, medication_name, notes (optional)."
+                "diagnosis, medication_name, notes (optional). "
+                "Returns immediately with careplan_id; generation is async (worker not included yet)."
             ),
         })
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
 
     form_data = _parse_api_body(request)
-    care_plan = _create_care_plan_from_input(form_data)
-    return JsonResponse(_care_plan_to_dict(care_plan), status=201)
+    care_plan = _submit_care_plan_request(form_data)
+    return JsonResponse(
+        {
+            "message": "已收到",
+            "careplan_id": care_plan.pk,
+            "status": care_plan.status,
+        },
+        status=202,
+    )
 
 
 def get_careplan_api(request: HttpRequest, id: int) -> JsonResponse:

@@ -15,6 +15,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
   web:
     build: .
     ports:
@@ -28,8 +38,13 @@ services:
       POSTGRES_DB: careplan
       POSTGRES_USER: careplan
       POSTGRES_PASSWORD: careplan
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CAREPLAN_REDIS_QUEUE_KEY: careplan:pending
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     command: >
       sh -c "python manage.py migrate --noinput &&

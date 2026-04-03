@@ -22,7 +22,7 @@ venv/
 env/
 .python-version
 
-# SQLite (local dev DB, do not commit)
+# SQLite (local dev without Postgres)
 db.sqlite3
 *.sqlite3
 
@@ -42,3 +42,6 @@ Thumbs.db
 *.pem
 *.key
 
+# Accidental venv-like folders (do not commit)
+#/
+1./

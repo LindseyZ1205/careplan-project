@@ -1,44 +1,60 @@
-## CarePlan MVP (Django + Docker)
+## CarePlan MVP (Django + PostgreSQL + Docker)
 
-This is a minimal end‑to‑end MVP to:
+- **HTML form** → synchronous Django view → template “LLM” text (replace later with a real LLM).
+- **PostgreSQL** via Django ORM: **Patient**, **Doctor**, **Order**, **CarePlan** with foreign keys.
+- **CarePlan.status**: `pending` → `processing` → `completed` or `failed`.
+- **Docker Compose** runs **Postgres** and **web**; `migrate` runs before `runserver`.
 
-- show a very simple **HTML front‑end form**
-- send data to a **synchronous Django view**
-- generate a basic **care plan text** (placeholder for an LLM)
-- keep submitted care plans in **memory only** (Python list), no database modelling yet
-
-No validation rules, warnings, error design, queues, WebSockets or background workers are implemented here on purpose.
-
-### How to run (Docker, recommended)
-
-From the `careplan` directory:
+### Run with Docker Compose
 
 ```bash
 docker compose build
 docker compose up
 ```
 
-Then open `http://localhost:8000` in your browser.
+Open `http://localhost:8000`. Postgres is on host port **5432** (user/db/password: `careplan`).
 
-### Development (without Docker)
+### Run locally without Docker
 
-You can also run it locally if you have Python and Django installed:
+Without `POSTGRES_HOST`, settings fall back to **SQLite** (`db.sqlite3`) so you can still develop quickly.
+
+To use local Postgres instead, export:
 
 ```bash
+export POSTGRES_HOST=localhost
+export POSTGRES_DB=careplan
+export POSTGRES_USER=careplan
+export POSTGRES_PASSWORD=careplan
+```
+
+Then:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
 python manage.py runserver
 ```
 
-Then visit `http://127.0.0.1:8000/`.
+### Models
 
-### Where the main flow lives
+| Model    | Role |
+|----------|------|
+| Patient  | `first_name`, `last_name`, optional `mrn` |
+| Doctor   | `name`, optional `npi` |
+| Order    | FK → Patient, Doctor; `medication_name`, `diagnosis`, `notes` |
+| CarePlan | OneToOne → Order; `careplan_text`, `status` |
 
-- `core/views.py`:
-  - `careplan_form` – renders the HTML page, synchronously generates the care plan when you submit the form.
-  - `_generate_careplan_text` – a very small function that now just templates text; later you can swap this to call a real LLM.
-- `core/templates/core/index.html`:
-  - Simple modern‑looking form + output area.
+### API
 
-All state is stored in an in‑memory list `_CAREPLANS` inside `core/views.py`. When you restart the server or container, the data is reset.
+- `GET /api/careplan/` — short usage message.
+- `POST /api/careplan/` — create patient/doctor/order/care plan; returns JSON including `id` (CarePlan pk) and `status`.
+- `GET /api/careplan/<id>/` — fetch one care plan by CarePlan id.
 
+### Admin
+
+```bash
+python manage.py createsuperuser
+```
+
+Then open `/admin/` to browse tables.

@@ -7,4 +7,3 @@ urlpatterns = [
     path("api/careplan/", views.generate_careplan_api, name="generate_careplan_api"),
     path("api/careplan/<int:id>/", views.get_careplan_api, name="get_careplan"),
 ]
-

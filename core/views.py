@@ -1,32 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict
 
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.views.decorators.csrf import csrf_exempt
 
-
-_CAREPLANS: List[Dict[str, Any]] = []
-_next_id: int = 1  # 自增 ID，每条新记录 +1
-
-
-def _add_id_and_save(record: Dict[str, Any]) -> None:
-    """给 record 加上唯一 id，并追加到 _CAREPLANS。"""
-    global _next_id
-    record["id"] = _next_id
-    _next_id += 1
-    _CAREPLANS.append(record)
+from .models import CarePlan, Doctor, Order, Patient
 
 
 @dataclass
 class CarePlanInput:
     patient_first_name: str
     patient_last_name: str
+    patient_mrn: str
+    doctor_name: str
+    doctor_npi: str
     diagnosis: str
     medication_name: str
-    notes: str = ""
+    notes: str
 
 
 def _generate_careplan_text(data: CarePlanInput) -> str:
@@ -34,7 +28,8 @@ def _generate_careplan_text(data: CarePlanInput) -> str:
     return (
         f"Care Plan for {full_name}\n"
         f"Diagnosis: {data.diagnosis}\n"
-        f"Medication: {data.medication_name}\n\n"
+        f"Medication: {data.medication_name}\n"
+        f"Referring provider: {data.doctor_name} (NPI: {data.doctor_npi or 'n/a'})\n\n"
         "Problem List / Drug Therapy Problems (DTPs):\n"
         "- Pending detailed assessment based on full patient record.\n\n"
         "Goals (SMART format):\n"
@@ -50,21 +45,97 @@ def _generate_careplan_text(data: CarePlanInput) -> str:
     )
 
 
+def _care_plan_to_dict(cp: CarePlan) -> Dict[str, Any]:
+    order = cp.order
+    patient = order.patient
+    doctor = order.doctor
+    return {
+        "id": cp.pk,
+        "status": cp.status,
+        "careplan_text": cp.careplan_text,
+        "patient_first_name": patient.first_name,
+        "patient_last_name": patient.last_name,
+        "patient_mrn": patient.mrn,
+        "doctor_name": doctor.name,
+        "doctor_npi": doctor.npi,
+        "diagnosis": order.diagnosis,
+        "medication_name": order.medication_name,
+        "notes": order.notes,
+        "order_id": order.pk,
+        "patient_id": patient.pk,
+        "doctor_id": doctor.pk,
+    }
+
+
+@transaction.atomic
+def _create_care_plan_from_input(data: CarePlanInput) -> CarePlan:
+    patient = Patient.objects.create(
+        first_name=data.patient_first_name,
+        last_name=data.patient_last_name,
+        mrn=data.patient_mrn,
+    )
+    doctor = Doctor.objects.create(
+        name=data.doctor_name,
+        npi=data.doctor_npi,
+    )
+    order = Order.objects.create(
+        patient=patient,
+        doctor=doctor,
+        medication_name=data.medication_name,
+        diagnosis=data.diagnosis,
+        notes=data.notes,
+    )
+    care_plan = CarePlan.objects.create(
+        order=order,
+        status=CarePlan.Status.PENDING,
+    )
+    care_plan.status = CarePlan.Status.PROCESSING
+    care_plan.save(update_fields=["status", "updated_at"])
+    try:
+        text = _generate_careplan_text(data)
+        care_plan.careplan_text = text
+        care_plan.status = CarePlan.Status.COMPLETED
+    except Exception:
+        care_plan.careplan_text = ""
+        care_plan.status = CarePlan.Status.FAILED
+    care_plan.save(update_fields=["careplan_text", "status", "updated_at"])
+    return care_plan
+
+
+def _parse_form_input(request: HttpRequest) -> CarePlanInput:
+    return CarePlanInput(
+        patient_first_name=request.POST.get("patient_first_name", "").strip(),
+        patient_last_name=request.POST.get("patient_last_name", "").strip(),
+        patient_mrn=request.POST.get("patient_mrn", "").strip(),
+        doctor_name=request.POST.get("doctor_name", "").strip(),
+        doctor_npi=request.POST.get("doctor_npi", "").strip(),
+        diagnosis=request.POST.get("diagnosis", "").strip(),
+        medication_name=request.POST.get("medication_name", "").strip(),
+        notes=request.POST.get("notes", "").strip(),
+    )
+
+
+def _parse_api_body(request: HttpRequest) -> CarePlanInput:
+    body = getattr(request, "POST", {})
+    return CarePlanInput(
+        patient_first_name=body.get("patient_first_name", "").strip(),
+        patient_last_name=body.get("patient_last_name", "").strip(),
+        patient_mrn=body.get("patient_mrn", "").strip(),
+        doctor_name=body.get("doctor_name", "").strip(),
+        doctor_npi=body.get("doctor_npi", "").strip(),
+        diagnosis=body.get("diagnosis", "").strip(),
+        medication_name=body.get("medication_name", "").strip(),
+        notes=body.get("notes", "").strip(),
+    )
+
+
 def careplan_form(request: HttpRequest) -> HttpResponse:
     context: Dict[str, Any] = {}
 
     if request.method == "POST":
-        form_data = CarePlanInput(
-            patient_first_name=request.POST.get("patient_first_name", "").strip(),
-            patient_last_name=request.POST.get("patient_last_name", "").strip(),
-            diagnosis=request.POST.get("diagnosis", "").strip(),
-            medication_name=request.POST.get("medication_name", "").strip(),
-            notes=request.POST.get("notes", "").strip(),
-        )
-        generated_text = _generate_careplan_text(form_data)
-        record = {**asdict(form_data), "careplan_text": generated_text}
-        _add_id_and_save(record)
-        context["careplan"] = record
+        form_data = _parse_form_input(request)
+        care_plan = _create_care_plan_from_input(form_data)
+        context["careplan"] = _care_plan_to_dict(care_plan)
 
     return render(request, "core/index.html", context)
 
@@ -73,31 +144,20 @@ def careplan_form(request: HttpRequest) -> HttpResponse:
 def generate_careplan_api(request: HttpRequest) -> JsonResponse:
     if request.method == "GET":
         return JsonResponse({
-            "message": "Care plan API. Use POST with: patient_first_name, patient_last_name, diagnosis, medication_name, notes (optional).",
-            "example": "POST to this URL with form/json body",
+            "message": (
+                "Care plan API. POST with: patient_first_name, patient_last_name, "
+                "patient_mrn (optional), doctor_name, doctor_npi (optional), "
+                "diagnosis, medication_name, notes (optional)."
+            ),
         })
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
 
-    body: Dict[str, Any] = getattr(request, "POST", {})
-    form_data = CarePlanInput(
-        patient_first_name=body.get("patient_first_name", "").strip(),
-        patient_last_name=body.get("patient_last_name", "").strip(),
-        diagnosis=body.get("diagnosis", "").strip(),
-        medication_name=body.get("medication_name", "").strip(),
-        notes=body.get("notes", "").strip(),
-    )
-    generated_text = _generate_careplan_text(form_data)
-    record = {**asdict(form_data), "careplan_text": generated_text}
-    _add_id_and_save(record)
-
-    return JsonResponse(record, status=201)
+    form_data = _parse_api_body(request)
+    care_plan = _create_care_plan_from_input(form_data)
+    return JsonResponse(_care_plan_to_dict(care_plan), status=201)
 
 
 def get_careplan_api(request: HttpRequest, id: int) -> JsonResponse:
-    """GET /api/careplan/<id>/：根据唯一 id 返回一条 care plan，找不到返回 404。"""
-    for record in _CAREPLANS:
-        if record.get("id") == id:
-            return JsonResponse(record)
-    return JsonResponse({"detail": "Care plan not found."}, status=404)
-
+    care_plan = get_object_or_404(CarePlan.objects.select_related("order__patient", "order__doctor"), pk=id)
+    return JsonResponse(_care_plan_to_dict(care_plan))

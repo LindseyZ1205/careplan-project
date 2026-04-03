@@ -62,6 +62,8 @@ services:
       POSTGRES_PASSWORD: careplan
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Dev/test: no real LLM. Production: set LLM_MODE=openai and OPENAI_API_KEY.
+      LLM_MODE: mock
     depends_on:
       db:
         condition: service_healthy

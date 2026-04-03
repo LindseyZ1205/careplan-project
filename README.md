@@ -2,7 +2,7 @@
 
 - **Submit** creates **Patient / Doctor / Order / CarePlan** with `status=pending`, then **`transaction.on_commit`** schedules **`generate_care_plan_task.delay(careplan_id)`** (Celery broker = Redis).
 - **HTTP** returns **202** + `careplan_id` immediately. **No polling, no SSE, no auto-refresh** — you only see `completed` + `careplan_text` after **you** reload the page or call **GET** `/api/careplan/<id>/` again.
-- **Celery worker** runs **`core.tasks.generate_care_plan_task`**: sets `processing` → calls **LLM** (`core/llm.py`: OpenAI if `OPENAI_API_KEY`, else template text) → `completed`; on failure **retries up to 3 times** with **exponential backoff** (1s, 2s, 4s), then **`failed`**.
+- **Celery worker** consumes tasks from the **Redis broker** (not a hand-written `BLPOP` loop). **`generate_care_plan_task`** sets `processing` → **`generate_careplan_with_llm`** (`core/llm.py`, mode from **`LLM_MODE`**) → `completed`; on failure **retries up to 3 times** with exponential backoff, then **`failed`**.
 
 ### Run with Docker Compose
 
@@ -32,7 +32,7 @@ React uses a **Vite proxy** (`/api` → Django). For a separate origin, set **`C
    - `Task core.tasks.generate_care_plan_task[<uuid>] succeeded`
 2. **Redis** — `docker compose exec redis redis-cli MONITOR` (briefly) or `KEYS *` can show Celery/kombu traffic; easiest is still **worker logs** + **GET** API.
 3. **Database / API** — After a few seconds, **GET** `/api/careplan/<careplan_id>/` should show `"status": "completed"` and a non-empty `careplan_text` (or `"failed"` if LLM kept erroring after retries).
-4. **Optional: OpenAI** — Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`, default `gpt-4o-mini`) on **web** and **celery** services in `docker-compose.yml` to use the real API; without it, the worker uses the **template** generator (still async).
+4. **LLM modes** — Default in Compose for **celery** is **`LLM_MODE=mock`** (fixed fake text, no network). For production, set **`LLM_MODE=openai`** plus **`OPENAI_API_KEY`** on **celery** (and **web** if needed). Use **`LLM_MODE=template`** for deterministic text from DB fields without OpenAI.
 
 ### Local dev without Docker
 
@@ -54,8 +54,10 @@ export CELERY_TASK_ALWAYS_EAGER=1
 
 | Variable | Purpose |
 |----------|---------|
-| `OPENAI_API_KEY` | If set, calls OpenAI Chat Completions; otherwise template text |
+| `LLM_MODE` | **`mock`** (default in `docker-compose` for celery) — fixed mock body via `mock_llm_generate_careplan`. **`template`** — `generate_careplan_template_text` from order/patient fields. **`openai`** — real Chat Completions (requires `OPENAI_API_KEY`). |
+| `OPENAI_API_KEY` | Required when `LLM_MODE=openai` |
 | `OPENAI_MODEL` | Default `gpt-4o-mini` |
+| `MOCK_LLM_BODY_FILE` | Optional path to a text file replacing the built-in mock body |
 
 ### Admin
 

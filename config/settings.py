@@ -120,3 +120,6 @@ else:
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+
+# LLM: mock (fixed text, no network) | template (deterministic from DB fields) | openai (real API)
+LLM_MODE = os.environ.get("LLM_MODE", "mock").strip().lower()

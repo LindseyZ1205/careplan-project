@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 
 from .llm import generate_careplan_with_llm
@@ -14,8 +15,9 @@ logger = logging.getLogger(__name__)
 @shared_task(bind=True, max_retries=3)
 def generate_care_plan_task(self, careplan_id: int) -> str | None:
     """
-    Load CarePlan, set processing, call LLM, save completed; on failure retry
-    up to 3 times with exponential backoff (1s, 2s, 4s), then mark failed.
+    Celery pulls tasks from the broker (Redis). This task loads the CarePlan,
+    calls generate_careplan_with_llm (mock / template / openai per LLM_MODE),
+    then saves to the database.
     """
     try:
         cp = CarePlan.objects.select_related("order__patient", "order__doctor").get(pk=careplan_id)
@@ -38,6 +40,11 @@ def generate_care_plan_task(self, careplan_id: int) -> str | None:
         locked.save(update_fields=["status", "updated_at"])
 
     cp.refresh_from_db()
+    logger.info(
+        "generate_care_plan_task id=%s LLM_MODE=%s",
+        careplan_id,
+        getattr(settings, "LLM_MODE", "mock"),
+    )
     try:
         text = generate_careplan_with_llm(cp)
     except Exception as exc:

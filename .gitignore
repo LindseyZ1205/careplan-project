@@ -45,3 +45,7 @@ Thumbs.db
 # Accidental venv-like folders (do not commit)
 #/
 1./
+
+# Node (React)
+frontend/node_modules/
+frontend/dist/

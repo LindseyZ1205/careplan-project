@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 
 from django.conf import settings
@@ -87,16 +88,23 @@ def _parse_form_input(request: HttpRequest) -> CarePlanInput:
 
 
 def _parse_api_body(request: HttpRequest) -> CarePlanInput:
-    body = getattr(request, "POST", {})
+    if request.content_type and "application/json" in request.content_type:
+        try:
+            raw = json.loads(request.body.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw = {}
+        body = raw if isinstance(raw, dict) else {}
+    else:
+        body = request.POST
     return CarePlanInput(
-        patient_first_name=body.get("patient_first_name", "").strip(),
-        patient_last_name=body.get("patient_last_name", "").strip(),
-        patient_mrn=body.get("patient_mrn", "").strip(),
-        doctor_name=body.get("doctor_name", "").strip(),
-        doctor_npi=body.get("doctor_npi", "").strip(),
-        diagnosis=body.get("diagnosis", "").strip(),
-        medication_name=body.get("medication_name", "").strip(),
-        notes=body.get("notes", "").strip(),
+        patient_first_name=str(body.get("patient_first_name", "") or "").strip(),
+        patient_last_name=str(body.get("patient_last_name", "") or "").strip(),
+        patient_mrn=str(body.get("patient_mrn", "") or "").strip(),
+        doctor_name=str(body.get("doctor_name", "") or "").strip(),
+        doctor_npi=str(body.get("doctor_npi", "") or "").strip(),
+        diagnosis=str(body.get("diagnosis", "") or "").strip(),
+        medication_name=str(body.get("medication_name", "") or "").strip(),
+        notes=str(body.get("notes", "") or "").strip(),
     )
 
 
@@ -123,8 +131,8 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
                 "POST to enqueue a care plan: patient_first_name, patient_last_name, "
                 "patient_mrn (optional), doctor_name, doctor_npi (optional), "
                 "diagnosis, medication_name, notes (optional). "
-                "Returns 202 with careplan_id; a Celery worker generates text. "
-                "Refresh GET /api/careplan/<id>/ manually to see completion — no push to browser."
+                "Returns 202 with careplan_id; Celery worker generates text. "
+                "Poll GET /api/careplan/<id>/status/ for status + content when completed."
             ),
         })
     if request.method != "POST":
@@ -145,3 +153,20 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
 def get_careplan_api(request: HttpRequest, id: int) -> JsonResponse:
     care_plan = get_object_or_404(CarePlan.objects.select_related("order__patient", "order__doctor"), pk=id)
     return JsonResponse(_care_plan_to_dict(care_plan))
+
+
+def careplan_status_api(request: HttpRequest, id: int) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+    care_plan = get_object_or_404(CarePlan.objects.only("pk", "status", "careplan_text"), pk=id)
+    payload: Dict[str, Any] = {
+        "careplan_id": care_plan.pk,
+        "status": care_plan.status,
+        "content": None,
+        "error": None,
+    }
+    if care_plan.status == CarePlan.Status.COMPLETED:
+        payload["content"] = care_plan.careplan_text
+    elif care_plan.status == CarePlan.Status.FAILED:
+        payload["error"] = "Care plan generation failed after retries."
+    return JsonResponse(payload)

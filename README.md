@@ -13,7 +13,17 @@ docker compose up
 
 Services: **web** (port **8000**), **db** (Postgres **5432**), **redis** (**6379**), **celery** (worker).
 
-Open `http://localhost:8000`, submit the form, note `careplan_id`. Watch the **celery** container logs for `Task core.tasks.generate_care_plan_task[...] succeeded`. Then **manually** open `/api/careplan/<id>/` or refresh — until then, the UI still shows only “已收到”.
+Open `http://localhost:8000` for the Django template form, or **`http://localhost:5173`** for the **React** app (Vite dev server). The React UI **polls** `GET /api/careplan/<id>/status/` every **3 seconds** until `completed` (shows `content`) or `failed` (shows error).
+
+Watch **celery** logs for `Task core.tasks.generate_care_plan_task[...] succeeded`.
+
+### Status API (polling)
+
+- **`GET /api/careplan/<id>/status/`** → `{ careplan_id, status, content, error }`  
+  - `content` is set only when `status === "completed"`.  
+  - `error` is set when `status === "failed"`.
+
+React uses a **Vite proxy** (`/api` → Django). For a separate origin, set **`CORS_ALLOWED_ORIGINS`** on Django (see `settings.py`).
 
 ### How to verify Celery is working
 

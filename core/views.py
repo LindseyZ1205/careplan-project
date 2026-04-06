@@ -1,119 +1,27 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Dict
 
-from django.conf import settings
-from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.csrf import csrf_exempt
 
-from .models import CarePlan, Doctor, Order, Patient
-from .textgen import CarePlanInput
-
-
-def _care_plan_to_dict(cp: CarePlan) -> Dict[str, Any]:
-    order = cp.order
-    patient = order.patient
-    doctor = order.doctor
-    return {
-        "id": cp.pk,
-        "status": cp.status,
-        "careplan_text": cp.careplan_text,
-        "patient_first_name": patient.first_name,
-        "patient_last_name": patient.last_name,
-        "patient_mrn": patient.mrn,
-        "doctor_name": doctor.name,
-        "doctor_npi": doctor.npi,
-        "diagnosis": order.diagnosis,
-        "medication_name": order.medication_name,
-        "notes": order.notes,
-        "order_id": order.pk,
-        "patient_id": patient.pk,
-        "doctor_id": doctor.pk,
-    }
-
-
-def _create_pending_care_plan(data: CarePlanInput) -> CarePlan:
-    patient = Patient.objects.create(
-        first_name=data.patient_first_name,
-        last_name=data.patient_last_name,
-        mrn=data.patient_mrn,
-    )
-    doctor = Doctor.objects.create(
-        name=data.doctor_name,
-        npi=data.doctor_npi,
-    )
-    order = Order.objects.create(
-        patient=patient,
-        doctor=doctor,
-        medication_name=data.medication_name,
-        diagnosis=data.diagnosis,
-        notes=data.notes,
-    )
-    return CarePlan.objects.create(
-        order=order,
-        status=CarePlan.Status.PENDING,
-        careplan_text="",
-    )
-
-
-def _schedule_celery_task(careplan_id: int) -> None:
-    from .tasks import generate_care_plan_task
-
-    generate_care_plan_task.delay(careplan_id)
-
-
-def _submit_care_plan_request(data: CarePlanInput) -> CarePlan:
-    with transaction.atomic():
-        care_plan = _create_pending_care_plan(data)
-        pk = care_plan.pk
-        if settings.CELERY_BROKER_URL or settings.CELERY_TASK_ALWAYS_EAGER:
-            transaction.on_commit(lambda: _schedule_celery_task(pk))
-    return care_plan
-
-
-def _parse_form_input(request: HttpRequest) -> CarePlanInput:
-    return CarePlanInput(
-        patient_first_name=request.POST.get("patient_first_name", "").strip(),
-        patient_last_name=request.POST.get("patient_last_name", "").strip(),
-        patient_mrn=request.POST.get("patient_mrn", "").strip(),
-        doctor_name=request.POST.get("doctor_name", "").strip(),
-        doctor_npi=request.POST.get("doctor_npi", "").strip(),
-        diagnosis=request.POST.get("diagnosis", "").strip(),
-        medication_name=request.POST.get("medication_name", "").strip(),
-        notes=request.POST.get("notes", "").strip(),
-    )
-
-
-def _parse_api_body(request: HttpRequest) -> CarePlanInput:
-    if request.content_type and "application/json" in request.content_type:
-        try:
-            raw = json.loads(request.body.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raw = {}
-        body = raw if isinstance(raw, dict) else {}
-    else:
-        body = request.POST
-    return CarePlanInput(
-        patient_first_name=str(body.get("patient_first_name", "") or "").strip(),
-        patient_last_name=str(body.get("patient_last_name", "") or "").strip(),
-        patient_mrn=str(body.get("patient_mrn", "") or "").strip(),
-        doctor_name=str(body.get("doctor_name", "") or "").strip(),
-        doctor_npi=str(body.get("doctor_npi", "") or "").strip(),
-        diagnosis=str(body.get("diagnosis", "") or "").strip(),
-        medication_name=str(body.get("medication_name", "") or "").strip(),
-        notes=str(body.get("notes", "") or "").strip(),
-    )
+from .models import CarePlan
+from .serializers import (
+    care_plan_status_payload,
+    care_plan_to_dict,
+    parse_api_body,
+    parse_form_input,
+)
+from .services import submit_care_plan_request
 
 
 def careplan_form(request: HttpRequest) -> HttpResponse:
     context: Dict[str, Any] = {}
 
     if request.method == "POST":
-        form_data = _parse_form_input(request)
-        care_plan = _submit_care_plan_request(form_data)
+        form_data = parse_form_input(request)
+        care_plan = submit_care_plan_request(form_data)
         context["ack"] = {
             "message": "已收到",
             "careplan_id": care_plan.pk,
@@ -138,8 +46,8 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
 
-    form_data = _parse_api_body(request)
-    care_plan = _submit_care_plan_request(form_data)
+    form_data = parse_api_body(request)
+    care_plan = submit_care_plan_request(form_data)
     return JsonResponse(
         {
             "message": "已收到",
@@ -152,21 +60,11 @@ def generate_careplan_api(request: HttpRequest) -> JsonResponse:
 
 def get_careplan_api(request: HttpRequest, id: int) -> JsonResponse:
     care_plan = get_object_or_404(CarePlan.objects.select_related("order__patient", "order__doctor"), pk=id)
-    return JsonResponse(_care_plan_to_dict(care_plan))
+    return JsonResponse(care_plan_to_dict(care_plan))
 
 
 def careplan_status_api(request: HttpRequest, id: int) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
     care_plan = get_object_or_404(CarePlan.objects.only("pk", "status", "careplan_text"), pk=id)
-    payload: Dict[str, Any] = {
-        "careplan_id": care_plan.pk,
-        "status": care_plan.status,
-        "content": None,
-        "error": None,
-    }
-    if care_plan.status == CarePlan.Status.COMPLETED:
-        payload["content"] = care_plan.careplan_text
-    elif care_plan.status == CarePlan.Status.FAILED:
-        payload["error"] = "Care plan generation failed after retries."
-    return JsonResponse(payload)
+    return JsonResponse(care_plan_status_payload(care_plan))
